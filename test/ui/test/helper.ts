@@ -1,0 +1,163 @@
+import type { Locator, Page } from '@playwright/test'
+import type { EditorFromTextArea } from 'codemirror'
+import type { InlineConfig, PreviewServer } from 'vite'
+import type { CliOptions, Vitest } from 'vitest/node'
+import assert from 'node:assert'
+import { readFileSync } from 'node:fs'
+import { Writable } from 'node:stream'
+import { test as base, expect } from '@playwright/test'
+import { preview } from 'vite'
+import { startVitest } from 'vitest/node'
+
+// Vitest's main-process module runner (globalSetup, reporters, etc.) replaces
+// Error.prepareStackTrace on startup, which breaks Playwright's source-mapped
+// locations of test steps in traces. Restoring it only loses source maps for
+// errors from those main-process modules, which these tests don't rely on.
+async function preserveStackTrace<T>(fn: () => Promise<T>): Promise<T> {
+  const prepareStackTrace = Error.prepareStackTrace
+  try {
+    return await fn()
+  } finally {
+    Error.prepareStackTrace = prepareStackTrace
+  }
+}
+
+export const test = base.extend<{ virtualization: boolean }>({
+  // e2e tests render the whole explorer and editor unless they test virtualization itself
+  virtualization: [false, { option: true }],
+  page: async ({ page, virtualization }, use) => {
+    if (!virtualization) {
+      await page.addInitScript(() => {
+        Object.assign(globalThis, { VITEST_UI_DISABLE_VIRTUALIZATION: true })
+      })
+    }
+    await use(page)
+  },
+})
+
+export async function startVitestSimple(cliOptions: CliOptions): Promise<Vitest> {
+  const stdout = new Writable({ write: (_, __, callback) => callback() })
+  const stderr = new Writable({ write: (_, __, callback) => callback() })
+  const vitest = await preserveStackTrace(() =>
+    startVitest(undefined, cliOptions, {}, { stdout, stderr }),
+  )
+  await vitest.close()
+  return vitest
+}
+
+export async function startVitestUi(
+  cliOptions: CliOptions,
+  viteOverrides: InlineConfig = {},
+): Promise<{ vitest: Vitest; url: string }> {
+  // silence Vitest logs
+  const stdout = new Writable({ write: (_, __, callback) => callback() })
+  const stderr = new Writable({ write: (_, __, callback) => callback() })
+  const vitest = await preserveStackTrace(() =>
+    startVitest(undefined, cliOptions, viteOverrides, { stdout, stderr }),
+  )
+
+  const address = vitest.vite.httpServer?.address()
+  assert(address && typeof address === 'object', 'Invalid server address')
+
+  const uiUrl = new URL(vitest.config.uiBase, `http://localhost:${address.port}`)
+  uiUrl.searchParams.set('token', vitest.config.api.token)
+
+  return {
+    vitest,
+    url: uiUrl.toString(),
+  }
+}
+
+export async function startHtmlReportPreview(
+  cliOptions: CliOptions,
+  previewOptions: InlineConfig,
+): Promise<{ previewServer: PreviewServer; url: string }> {
+  const stdout = new Writable({ write: (_, __, callback) => callback() })
+  const stderr = new Writable({ write: (_, __, callback) => callback() })
+  await preserveStackTrace(() => startVitest('test', undefined, cliOptions, {}, { stdout, stderr }))
+
+  const previewServer = await preview(previewOptions)
+  const address = previewServer.httpServer?.address()
+  assert(address && typeof address === 'object', 'Invalid server address')
+
+  return {
+    previewServer,
+    url: `http://localhost:${address.port}`,
+  }
+}
+
+export async function assertTestCounts(
+  page: Page,
+  { pass, fail, skip = 0 }: { pass: number; fail: number; skip?: number },
+) {
+  const skipped = skip ? ` ${skip} Skip` : ''
+  await expect
+    .soft(page.getByTestId('tests-entry'))
+    .toContainText(`${pass} Pass ${fail} Fail${skipped} ${pass + fail + skip} Total`)
+}
+
+export function getExplorerItem(page: Page, name: string) {
+  // The virtual scroller keeps unused rows in the DOM with visibility hidden.
+  return page
+    .locator('[data-testid="explorer-item"]:visible')
+    .and(page.getByLabel(name, { exact: true }))
+}
+
+export async function openExplorerItem(page: Page, name: string) {
+  await getExplorerItem(page, name).click()
+}
+
+export async function openExplorerFileItem(page: Page, name: string) {
+  const item = getExplorerItem(page, name)
+  await item.hover()
+  await item.getByTestId('btn-open-details').click()
+}
+
+export function getAnnotation(locator: Page | Locator, message: string) {
+  return locator.getByRole('note').filter({ hasText: message })
+}
+
+export async function assertDownloadAttachment(
+  page: Page,
+  options: {
+    name: string
+    suggestedFilename: string
+    content: string
+  },
+) {
+  const annotation = getAnnotation(page, options.name)
+  const downloadPromise = page.waitForEvent('download')
+  await annotation.getByRole('link').click()
+  const download = await downloadPromise
+  expect(download.suggestedFilename()).toBe(options.suggestedFilename)
+  const downloadPath = await download.path()
+  expect(readFileSync(downloadPath, 'utf-8')).toBe(options.content)
+}
+
+export async function assertImageAttachment(
+  page: Page,
+  options: {
+    name: string
+  },
+) {
+  const annotation = page.getByRole('note').filter({ hasText: options.name })
+  await expect(annotation.getByRole('link')).toHaveAttribute('href', /.+/)
+  await expect(annotation.getByRole('img')).not.toHaveJSProperty('naturalWidth', 0)
+}
+
+export async function evaluateEditor<T>(
+  page: Page,
+  fn: (editor: EditorFromTextArea, ...args: any[]) => T,
+  ...args: any[]
+): Promise<T> {
+  const editor = page.getByTestId('editor').locator('.CodeMirror')
+  return editor.evaluate(
+    (e, [fnStr, args]) => {
+      const codemirror = (e as any).CodeMirror
+      // oxlint-disable-next-line no-new-func
+      const fn = new Function('codemirror', 'args', `return (${fnStr})(codemirror, ...args)`)
+      return fn(codemirror, args)
+    },
+    [fn.toString(), args],
+  )
+}

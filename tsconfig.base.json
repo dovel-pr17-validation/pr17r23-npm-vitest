@@ -1,0 +1,20 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "lib": ["esnext"],
+    "customConditions": ["__vitest_source__"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "paths": {
+      "~/*": ["./packages/ui/client/*"],
+      "#test-utils": ["./test/test-utils/index.ts"]
+    },
+    "allowImportingTsExtensions": true,
+    "strict": true,
+    "declaration": true,
+    "noEmit": true,
+    "stripInternal": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true
+  }
+}

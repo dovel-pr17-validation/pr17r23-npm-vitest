@@ -1,0 +1,80 @@
+import type * as vite from 'vite'
+import type { UserConfig as ViteConfig, Plugin as VitePlugin } from 'vite'
+import type { PluginHarness } from '../config/pluginHarness'
+import { resolve } from 'pathe'
+import { ViteConfigPlugin } from './config'
+import { CoverageTransform } from './coverageTransform'
+import { CSSEnablerPlugin } from './cssEnabler'
+import { MetaEnvReplacerPlugin } from './metaEnvReplacer'
+import { MocksPlugins } from './mocks'
+import { NormalizeURLPlugin } from './normalizeURL'
+import { SsrRunnerFixerPlugin } from './ssrRunnerFixer'
+import { appendApiTokenFsDeny, resolveTestCacheDir } from './utils'
+import { VitestProjectResolver } from './vitestResolver'
+
+export function ProjectRootPlugin(projectRoot: string): VitePlugin {
+  return {
+    name: 'vitest:project-root',
+    enforce: 'pre',
+    config: {
+      order: 'pre',
+      handler(viteConfig) {
+        // Vite resolves a relative root against the cwd, which is the root of the workspace
+        viteConfig.root = viteConfig.root ? resolve(projectRoot, viteConfig.root) : projectRoot
+        if (viteConfig.test?.root) {
+          viteConfig.test.root = resolve(projectRoot, viteConfig.test.root)
+        }
+      },
+    },
+  }
+}
+
+export function WorkspaceVitestPlugin(
+  harness: PluginHarness,
+  globalViteConfig: vite.ResolvedConfig,
+): VitePlugin[] {
+  return [
+    {
+      name: 'vitest:project',
+      enforce: 'post',
+      options() {
+        this.meta.watchMode = false
+      },
+      config(viteConfig) {
+        const testConfig = viteConfig.test || {}
+        const root = testConfig.root || viteConfig.root
+        appendApiTokenFsDeny(viteConfig)
+
+        const config: ViteConfig = {
+          base: '/',
+          root,
+          cacheDir: resolveTestCacheDir(
+            resolve(root || process.cwd()),
+            testConfig,
+            viteConfig.cacheDir,
+          ),
+          server: {
+            open: false,
+            fs: {
+              allow: globalViteConfig.server.fs.allow,
+            },
+          },
+        }
+
+        return config
+      },
+      configResolved(config) {
+        // project servers never watch; the top-level server owns the watcher
+        config.server.watch = null
+      },
+    },
+    SsrRunnerFixerPlugin(harness),
+    MetaEnvReplacerPlugin(),
+    ...CSSEnablerPlugin(),
+    CoverageTransform(harness),
+    ...ViteConfigPlugin(harness),
+    ...MocksPlugins(),
+    VitestProjectResolver(harness),
+    NormalizeURLPlugin(),
+  ]
+}

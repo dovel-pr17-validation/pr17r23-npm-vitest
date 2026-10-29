@@ -1,0 +1,16 @@
+{
+  "editor.defaultFormatter": "oxc.oxc-vscode",
+  "editor.formatOnSave": true,
+
+  "editor.codeActionsOnSave": {
+    "source.fixAll.oxc": "explicit",
+    "source.organizeImports": "never"
+  },
+
+  "vitest.ignoreWorkspace": true,
+  "vitest.configSearchPatternInclude": "test/{unit,e2e,config,browser,reporters}/{vitest,vite}.{config.ts,config.unit.mts}",
+  "testing.automaticallyOpenTestResults": "neverOpen",
+
+  // Use the project's typescript version
+  "js/ts.tsdk.path": "node_modules/typescript/lib"
+}

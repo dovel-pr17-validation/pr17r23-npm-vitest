@@ -1,0 +1,17 @@
+{
+  "name": "@vitest/test-typescript",
+  "type": "module",
+  "scripts": {
+    "test": "vitest --test-timeout 60000",
+    "types": "vitest --typecheck.only --typecheck.allowJs --run",
+    "tsc": "tsc --watch --pretty false --noEmit"
+  },
+  "dependencies": {
+    "vitest": "workspace:*"
+  },
+  "devDependencies": {
+    "pathe": "catalog:",
+    "typescript": "^5.9.3",
+    "vue-tsc": "^3.3.13"
+  }
+}

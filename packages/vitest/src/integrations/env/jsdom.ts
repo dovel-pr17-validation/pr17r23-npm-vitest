@@ -1,0 +1,395 @@
+import type { ConstructorOptions, DOMWindow, VirtualConsole as IVirtualConsole } from 'jsdom'
+import type { Environment } from '../../types/environment'
+import type { JSDOMOptions } from '../../types/jsdom-options'
+import { createRequire } from 'node:module'
+import { URL as NodeURL } from 'node:url'
+import { populateGlobal } from './utils'
+
+function catchWindowErrors(window: DOMWindow) {
+  let userErrorListenerCount = 0
+  function throwUnhandlerError(e: ErrorEvent) {
+    if (userErrorListenerCount === 0 && e.error != null) {
+      e.preventDefault()
+      process.emit('uncaughtException', e.error)
+    }
+  }
+  const addEventListener = window.addEventListener.bind(window)
+  const removeEventListener = window.removeEventListener.bind(window)
+  window.addEventListener('error', throwUnhandlerError)
+  window.addEventListener = function (...args: [any, any, any]) {
+    if (args[0] === 'error') {
+      userErrorListenerCount++
+    }
+    return addEventListener.apply(this, args)
+  }
+  window.removeEventListener = function (...args: [any, any, any]) {
+    if (args[0] === 'error' && userErrorListenerCount) {
+      userErrorListenerCount--
+    }
+    return removeEventListener.apply(this, args)
+  }
+  return function clearErrorHandlers() {
+    window.removeEventListener('error', throwUnhandlerError)
+  }
+}
+
+let NodeFormData_!: typeof FormData
+let NodeBlob_!: typeof Blob
+let NodeRequest_!: typeof Request
+
+interface LegacyResourceLoader {
+  new (options?: { userAgent?: string }): NonNullable<ConstructorOptions['resources']>
+}
+
+function getResourceOptions(
+  jsdom: typeof import('jsdom'),
+  resources: JSDOMOptions['resources'],
+  userAgent: string | undefined,
+) {
+  const ResourceLoader = (
+    jsdom as typeof jsdom & {
+      ResourceLoader?: LegacyResourceLoader
+    }
+  ).ResourceLoader
+
+  // jsdom 28 replaced ResourceLoader with a resources options object.
+  if (!ResourceLoader) {
+    return {
+      resources: userAgent ? { userAgent } : resources,
+    }
+  }
+
+  return {
+    resources: resources ?? (userAgent ? new ResourceLoader({ userAgent }) : undefined),
+    userAgent,
+  }
+}
+
+export default <Environment>{
+  name: 'jsdom',
+  viteEnvironment: 'client',
+  async setupVM({ jsdom = {} }) {
+    // delay initialization because it takes ~1s
+    NodeFormData_ = globalThis.FormData
+    NodeBlob_ = globalThis.Blob
+    NodeRequest_ = globalThis.Request
+
+    const jsdomModule = await import('jsdom')
+    const { CookieJar, JSDOM, VirtualConsole } = jsdomModule
+    const {
+      html = '<!DOCTYPE html>',
+      userAgent,
+      url = 'http://localhost:3000',
+      contentType = 'text/html',
+      pretendToBeVisual = true,
+      includeNodeLocations = false,
+      runScripts = 'dangerously',
+      resources,
+      console = false,
+      cookieJar = false,
+      ...restOptions
+    } = jsdom as JSDOMOptions
+    let virtualConsole: IVirtualConsole | undefined
+    if (console && globalThis.console) {
+      virtualConsole = new VirtualConsole()
+      // jsdom <27
+      if ('sendTo' in virtualConsole) {
+        ;(virtualConsole.sendTo as any)(globalThis.console)
+      }
+      // jsdom >=27
+      else {
+        virtualConsole.forwardTo(globalThis.console)
+      }
+    }
+    let dom = new JSDOM(html, {
+      pretendToBeVisual,
+      runScripts,
+      url,
+      virtualConsole,
+      cookieJar: cookieJar ? new CookieJar() : undefined,
+      includeNodeLocations,
+      contentType,
+      ...getResourceOptions(jsdomModule, resources, userAgent),
+      ...restOptions,
+    })
+
+    const clearAddEventListenerPatch = patchAddEventListener(dom.window)
+
+    const clearWindowErrors = catchWindowErrors(dom.window)
+
+    const utils = createCompatUtils(dom.window)
+
+    // TODO: browser doesn't expose Buffer, but a lot of dependencies use it
+    dom.window.Buffer = Buffer
+    dom.window.jsdom = dom
+    dom.window.Request = createCompatRequest(utils)
+    dom.window.URL = createJSDOMCompatURL(utils)
+
+    // inject web globals if they are missing in JSDOM but otherwise available in Nodejs
+    // https://nodejs.org/dist/latest/docs/api/globals.html
+    const globalNames = [
+      'structuredClone',
+      'BroadcastChannel',
+      'MessageChannel',
+      'MessagePort',
+      'TextEncoder',
+      'TextDecoder',
+    ] as const
+    for (const name of globalNames) {
+      const value = globalThis[name]
+      if (typeof value !== 'undefined' && typeof dom.window[name] === 'undefined') {
+        dom.window[name] = value
+      }
+    }
+
+    // since we are providing Node.js's Fetch API,
+    // we also should override other APIs they use
+    const overrideGlobals = [
+      'fetch',
+      'Response',
+      'Headers',
+      'AbortController',
+      'AbortSignal',
+      'URLSearchParams',
+      // URL and Request is overridden with a compat one
+      // 'URL',
+      // 'Request',
+    ] as const
+    for (const name of overrideGlobals) {
+      const value = globalThis[name]
+      if (typeof value !== 'undefined') {
+        dom.window[name] = value as any
+      }
+    }
+
+    return {
+      getVmContext() {
+        return dom.getInternalVMContext()
+      },
+      teardown() {
+        clearAddEventListenerPatch()
+        clearWindowErrors()
+        dom.window.close()
+        dom = undefined as any
+      },
+    }
+  },
+  async setup(global, { jsdom = {} }) {
+    // delay initialization because it takes ~1s
+    NodeFormData_ = globalThis.FormData
+    NodeBlob_ = globalThis.Blob
+    NodeRequest_ = globalThis.Request
+
+    const jsdomModule = await import('jsdom')
+    const { CookieJar, JSDOM, VirtualConsole } = jsdomModule
+    const {
+      html = '<!DOCTYPE html>',
+      userAgent,
+      url = 'http://localhost:3000',
+      contentType = 'text/html',
+      pretendToBeVisual = true,
+      includeNodeLocations = false,
+      runScripts = 'dangerously',
+      resources,
+      console = false,
+      cookieJar = false,
+      ...restOptions
+    } = jsdom as any
+    let virtualConsole: IVirtualConsole | undefined
+    if (console && globalThis.console) {
+      virtualConsole = new VirtualConsole()
+      // jsdom <27
+      if ('sendTo' in virtualConsole) {
+        ;(virtualConsole.sendTo as any)(globalThis.console)
+      }
+      // jsdom >=27
+      else {
+        virtualConsole.forwardTo(globalThis.console)
+      }
+    }
+    const dom = new JSDOM(html, {
+      pretendToBeVisual,
+      runScripts,
+      url,
+      virtualConsole,
+      cookieJar: cookieJar ? new CookieJar() : undefined,
+      includeNodeLocations,
+      contentType,
+      ...getResourceOptions(jsdomModule, resources, userAgent),
+      ...restOptions,
+    })
+
+    const clearAddEventListenerPatch = patchAddEventListener(dom.window)
+
+    const { keys, originals } = populateGlobal(global, dom.window, {
+      bindFunctions: true,
+    })
+
+    const clearWindowErrors = catchWindowErrors(global)
+    const utils = createCompatUtils(dom.window)
+
+    global.jsdom = dom
+    global.Request = createCompatRequest(utils)
+    global.URL = createJSDOMCompatURL(utils)
+
+    return {
+      teardown(global) {
+        clearAddEventListenerPatch()
+        clearWindowErrors()
+        dom.window.close()
+        delete global.jsdom
+        keys.forEach((key) => delete global[key])
+        originals.forEach((d, k) => Object.defineProperty(global, k, d))
+      },
+    }
+  },
+}
+
+function createCompatRequest(utils: CompatUtils) {
+  class Request extends NodeRequest_ {
+    constructor(...args: [input: RequestInfo, init?: RequestInit]) {
+      const [input, init] = args
+      if (init?.body != null) {
+        const compatInit = { ...init }
+        if (init.body instanceof utils.window.Blob) {
+          compatInit.body = utils.makeCompatBlob(init.body as any) as any
+        }
+        if (init.body instanceof utils.window.FormData) {
+          compatInit.body = utils.makeCompatFormData(init.body)
+        }
+        super(input, compatInit)
+      } else {
+        super(...args)
+      }
+    }
+
+    static [Symbol.hasInstance](instance: unknown): boolean {
+      return instance instanceof NodeRequest_
+    }
+  }
+  return Request
+}
+
+function createJSDOMCompatURL(utils: CompatUtils): typeof URL {
+  class URL extends NodeURL {
+    static createObjectURL(blob: any): string {
+      if (blob instanceof utils.window.Blob) {
+        const compatBlob = utils.makeCompatBlob(blob)
+        return NodeURL.createObjectURL(compatBlob as any)
+      }
+      return NodeURL.createObjectURL(blob)
+    }
+
+    static [Symbol.hasInstance](instance: unknown): boolean {
+      return instance instanceof NodeURL
+    }
+  }
+  return URL
+}
+
+interface CompatUtils {
+  window: DOMWindow
+  makeCompatBlob: (blob: Blob) => Blob
+  makeCompatFormData: (formData: FormData) => FormData
+}
+
+// jsdom keeps Blob bytes on an internal "impl" object and exposes no synchronous
+// public way to read them, so this reaches into its generated bindings
+function createBlobImplGetter(window: DOMWindow): (blob: Blob) => any {
+  const _require = createRequire(import.meta.url)
+  // jsdom 28.1 moved the generated bindings; jsdom has no "exports" map, so both subpaths resolve
+  for (const id of [
+    'jsdom/lib/generated/idl/utils.js',
+    'jsdom/lib/jsdom/living/generated/utils.js',
+  ]) {
+    try {
+      const { implForWrapper } = _require(id)
+      if (typeof implForWrapper === 'function') {
+        return implForWrapper
+      }
+    } catch {}
+  }
+  // jsdom < 30.1 also stores the impl under an own Symbol("impl")
+  const implSymbol = Object.getOwnPropertySymbols(new window.Blob())[0]
+  return (blob) => (blob as any)[implSymbol]
+}
+
+let getBlobImpl: (blob: Blob) => any
+
+function createCompatUtils(window: DOMWindow): CompatUtils {
+  getBlobImpl ??= createBlobImplGetter(window)
+  const utils = {
+    window,
+    makeCompatFormData(formData: FormData) {
+      const nodeFormData = new NodeFormData_()
+      formData.forEach((value, key) => {
+        if (value instanceof window.Blob) {
+          nodeFormData.append(key, utils.makeCompatBlob(value as any) as any)
+        } else {
+          nodeFormData.append(key, value)
+        }
+      })
+      return nodeFormData
+    },
+    makeCompatBlob(blob: Blob) {
+      const impl = getBlobImpl(blob)
+      if (!impl) {
+        throw new TypeError(
+          'Vitest cannot read the bytes of a jsdom Blob. This is a Vitest bug, please report it with your jsdom version.',
+        )
+      }
+      // jsdom 28 renamed `_buffer` to `_bytes`
+      return new NodeBlob_([impl._bytes ?? impl._buffer], { type: blob.type })
+    },
+  }
+  return utils
+}
+
+function patchAddEventListener(window: DOMWindow) {
+  const abortControllers = new WeakMap<AbortSignal, AbortController>()
+  const JSDOMAbortSignal = window.AbortSignal
+  const JSDOMAbortController = window.AbortController
+  const originalAddEventListener = window.EventTarget.prototype.addEventListener
+
+  function getJsdomAbortController(signal: AbortSignal) {
+    if (!abortControllers.has(signal)) {
+      const jsdomAbortController = new JSDOMAbortController()
+      signal.addEventListener('abort', () => {
+        jsdomAbortController.abort(signal.reason)
+      })
+      abortControllers.set(signal, jsdomAbortController)
+    }
+    return abortControllers.get(signal)!
+  }
+
+  window.EventTarget.prototype.addEventListener = function addEventListener(
+    type: string,
+    callback: EventListenerOrEventListenerObject | null,
+    options?: AddEventListenerOptions | boolean,
+  ) {
+    if (typeof options === 'object' && options?.signal != null) {
+      const { signal, ...otherOptions } = options
+      // - this happens because AbortSignal is provided by Node.js,
+      // but jsdom APIs require jsdom's AbortSignal, while Node APIs
+      // (like fetch and Request) require a Node.js AbortSignal
+      // - disable narrow typing with "as any" because we need it later
+      if (!((signal as any) instanceof JSDOMAbortSignal)) {
+        const jsdomCompatOptions = Object.create(null)
+        Object.assign(jsdomCompatOptions, otherOptions)
+
+        // use jsdom-native abort controller instead and forward the
+        // previous one with `addEventListener`
+        const jsdomAbortController = getJsdomAbortController(signal)
+
+        jsdomCompatOptions.signal = jsdomAbortController.signal
+        return originalAddEventListener.call(this, type, callback, jsdomCompatOptions)
+      }
+    }
+
+    return originalAddEventListener.call(this, type, callback, options)
+  }
+
+  return () => {
+    window.EventTarget.prototype.addEventListener = originalAddEventListener
+  }
+}

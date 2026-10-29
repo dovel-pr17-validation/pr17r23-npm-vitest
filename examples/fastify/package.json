@@ -1,0 +1,24 @@
+{
+  "name": "@vitest/example-fastify",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "main": "index.js",
+  "scripts": {
+    "dev": "NODE_ENV=development tsx watch src",
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:run": "vitest run"
+  },
+  "devDependencies": {
+    "@vitest/ui": "latest",
+    "fastify": "^5.12.7",
+    "supertest": "^7.3.1",
+    "tsx": "^4.23.15",
+    "vite": "latest",
+    "vitest": "latest"
+  },
+  "stackblitz": {
+    "startCommand": "npm run test:ui"
+  }
+}

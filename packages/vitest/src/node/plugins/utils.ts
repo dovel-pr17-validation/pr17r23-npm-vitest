@@ -1,0 +1,181 @@
+import type { DepOptimizationOptions, UserConfig as ViteConfig } from 'vite'
+import type { DepsOptimizationOptions, UIOptions, UserConfig } from '../types/config'
+import { slash } from '@vitest/utils/helpers'
+import { dirname, resolve } from 'pathe'
+import { searchForWorkspaceRoot, version as viteVersion } from 'vite'
+import * as vite from 'vite'
+import { rootDir } from '../../paths'
+import { API_TOKEN_FILE } from '../config/apiToken'
+import { hash } from '../hash'
+
+export function resolveTestCacheDir(
+  root: string,
+  testConfig: UserConfig,
+  viteCacheDir: string | undefined,
+): string {
+  const name = testConfig.name
+  const label = typeof name === 'string' ? name : name?.label || ''
+  const baseDir = slash(viteCacheDir || 'node_modules/.vite')
+  return resolve(root, baseDir, 'vitest', hash('sha1', label, 'hex'))
+}
+
+export function normalizeUIOptions(ui: UserConfig['ui']): UIOptions {
+  return typeof ui === 'object' ? ui : { enabled: ui }
+}
+
+export function resolveOptimizerConfig(
+  testOptions_: DepsOptimizationOptions | undefined,
+  viteOptions: DepOptimizationOptions | undefined,
+): DepOptimizationOptions {
+  const testOptions = testOptions_ || {}
+  let optimizeDeps: DepOptimizationOptions
+  if (testOptions.enabled !== true) {
+    testOptions.enabled ??= false
+
+    optimizeDeps = {
+      // experimental in Vite >2.9.2, entries remains to help with older versions
+      disabled: true,
+      entries: [],
+    }
+  } else {
+    const currentInclude = testOptions.include || viteOptions?.include || []
+    const exclude = [
+      'vitest',
+      // Ideally, we shouldn't optimize react in test mode, otherwise we need to optimize _every_ dependency that uses react.
+      'react',
+      'vue',
+      ...(testOptions.exclude || viteOptions?.exclude || []),
+    ]
+    const runtime = currentInclude.filter(
+      (n) => n.endsWith('jsx-dev-runtime') || n.endsWith('jsx-runtime'),
+    )
+    exclude.push(...runtime)
+
+    const include = (testOptions.include || viteOptions?.include || []).filter(
+      (n: string) => !exclude.includes(n),
+    )
+
+    optimizeDeps = {
+      ...viteOptions,
+      ...testOptions,
+      noDiscovery: true,
+      disabled: false,
+      entries: [],
+      exclude,
+      include,
+    }
+  }
+
+  // `optimizeDeps.disabled` is deprecated since v5.1.0-beta.1
+  // https://github.com/vitejs/vite/pull/15184
+  if (optimizeDeps.disabled) {
+    optimizeDeps.noDiscovery = true
+    optimizeDeps.include = []
+  }
+  delete optimizeDeps.disabled
+
+  return optimizeDeps
+}
+
+export interface DefineConfigResult {
+  /** dot-less JSON values, assigned to `globalThis` before each test file */
+  defines: Record<string, any>
+  /** entries applied by the runtime defines script at worker start */
+  scriptDefines: Record<string, any>
+}
+
+export function deleteDefineConfig(viteConfig: ViteConfig): DefineConfigResult {
+  const defines: Record<string, any> = {}
+  const scriptDefines: Record<string, any> = {}
+  if (viteConfig.define) {
+    delete viteConfig.define['process.env']
+    delete viteConfig.define.process
+    delete viteConfig.define.global
+  }
+  for (const key in viteConfig.define) {
+    const val = viteConfig.define[key]
+    // vitest sets this identity replacement to defeat vite:client-inject,
+    // it has to stay in the config
+    if (key === 'process.env.NODE_ENV' && val === 'process.env.NODE_ENV') {
+      continue
+    }
+    let replacement: any
+    try {
+      replacement = typeof val === 'string' ? JSON.parse(val) : val
+    } catch {
+      // a reference to code, like "__VAR__": "process.env.VAR";
+      // the defines script evaluates the raw value at runtime
+      scriptDefines[key] = val
+      delete viteConfig.define[key]
+      continue
+    }
+    if (key.startsWith('import.meta.env.')) {
+      const envKey = key.slice('import.meta.env.'.length)
+      process.env[envKey] = replacement
+      delete viteConfig.define[key]
+    } else if (key.startsWith('process.env.')) {
+      const envKey = key.slice('process.env.'.length)
+      process.env[envKey] = replacement
+      delete viteConfig.define[key]
+    } else if (!key.includes('.')) {
+      defines[key] = replacement
+      delete viteConfig.define[key]
+    } else {
+      scriptDefines[key] = val
+      delete viteConfig.define[key]
+    }
+  }
+  return { defines, scriptDefines }
+}
+
+// TODO: use Vite's own defaults once they are exported (request upstream)
+// copied from Vite 8.3 https://github.com/vitejs/vite/blob/v8.3.4/packages/vite/src/node/server/index.ts#L1254-L1261
+const VITE_DEFAULT_FS_DENY = [
+  '.env',
+  '.env.*',
+  '*.{crt,pem,key,p12,pfx,cer,der}',
+  '.npmrc',
+  '.yarnrc.yml',
+  '**/.git/**',
+]
+
+// Vite drops its default `server.fs.deny` once any value is set,
+// so the defaults are kept explicitly when the user didn't set one.
+export function appendApiTokenFsDeny(viteConfig: ViteConfig): void {
+  viteConfig.server ??= {}
+  viteConfig.server.fs ??= {}
+  viteConfig.server.fs.deny = [
+    ...(viteConfig.server.fs.deny ?? VITE_DEFAULT_FS_DENY),
+    API_TOKEN_FILE,
+  ]
+}
+
+export function resolveFsAllow(
+  projectRoot: string,
+  rootConfigFile: string | false | undefined,
+): string[] {
+  if (!rootConfigFile) {
+    return [searchForWorkspaceRoot(projectRoot), rootDir]
+  }
+  return [dirname(rootConfigFile), searchForWorkspaceRoot(projectRoot), rootDir]
+}
+
+export function getDefaultResolveOptions(): vite.ResolveOptions {
+  return {
+    // by default Vite resolves `module` field, which is not always a native ESM module
+    // setting this option can bypass that and fallback to cjs version
+    mainFields: [],
+    // same for `module` condition and Vite 5 doesn't even allow excluding it,
+    // but now it's possible since Vite 6.
+    conditions: getDefaultServerConditions(),
+  }
+}
+
+function getDefaultServerConditions(): string[] {
+  const viteMajor = Number(viteVersion.split('.')[0])
+  if (viteMajor >= 6) {
+    const conditions: string[] = (vite as any).defaultServerConditions
+    return conditions.filter((c) => c !== 'module')
+  }
+  return ['node']
+}

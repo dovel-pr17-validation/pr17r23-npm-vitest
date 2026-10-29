@@ -1,0 +1,22 @@
+{
+  "name": "@vitest/test-native",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "main": "index.js",
+  "scripts": {
+    "test": "vitest",
+    "test:ui": "vitest --ui",
+    "test:run": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@vitest/ui": "workspace:*",
+    "tinyspy": "^4.0.6",
+    "vite": "latest",
+    "vitest": "workspace:*"
+  },
+  "stackblitz": {
+    "startCommand": "npm run test:ui"
+  }
+}
